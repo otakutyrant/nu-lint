@@ -13,9 +13,9 @@ use nu_lint_analysis::{
     engine::LintEngine,
     fix::{apply_fixes, apply_fixes_to_stdin},
     log::init_test_log,
-    rule::Rule,
+    rule::{Rule, RuleCatalog},
 };
-use nu_lint_rules::{USED_RULES, groups::ALL_GROUPS};
+use nu_lint_rules::RULE_CATALOG;
 
 #[cfg(feature = "lsp")]
 use crate::lsp;
@@ -174,12 +174,12 @@ fn with_loaded_config(
 }
 
 impl InputArgs {
-    fn loaded_config(&self) -> Result<Config, LintError> {
-        let config = load_validated_config(self.config.as_deref())?;
+    fn loaded_config(&self, catalog: RuleCatalog) -> Result<Config, LintError> {
+        let config = load_validated_config(self.config.as_deref(), catalog)?;
         if self.only.is_empty() {
             return Ok(config);
         }
-        restrict_config_to_selection(config, &self.only)
+        restrict_config_to_selection(config, &self.only, catalog)
     }
 
     fn read_stdin() -> String {
@@ -192,8 +192,8 @@ impl InputArgs {
 }
 
 impl CheckArgs {
-    fn lint(&self, config: &Config) -> io::Result<ExitCode> {
-        let engine = crate::lint_engine_with_all_rules(config.clone());
+    fn lint(&self, config: &Config, catalog: RuleCatalog) -> io::Result<ExitCode> {
+        let engine = LintEngine::new(config.clone(), catalog);
 
         let violations = if self.input.stdin {
             let source = InputArgs::read_stdin();
@@ -227,8 +227,8 @@ impl CheckArgs {
 }
 
 impl FixArgs {
-    fn fix(&self, config: &Config) -> io::Result<ExitCode> {
-        let engine = crate::lint_engine_with_all_rules(config.clone());
+    fn fix(&self, config: &Config, catalog: RuleCatalog) -> io::Result<ExitCode> {
+        let engine = LintEngine::new(config.clone(), catalog);
 
         if self.input.stdin {
             Self::fix_stdin(&engine)?;
@@ -276,8 +276,8 @@ impl Cli {
             .unwrap_or(CliCommand::Check(self.default_check))
     }
 
-    fn list_rules(config: &Config) -> io::Result<()> {
-        let mut sorted_rules: Vec<&dyn Rule> = USED_RULES.to_vec();
+    fn list_rules(config: &Config, catalog: RuleCatalog) -> io::Result<()> {
+        let mut sorted_rules: Vec<&dyn Rule> = catalog.rules.to_vec();
         sorted_rules.sort_by_key(|r| r.id());
 
         let mut stdout = io::stdout().lock();
@@ -289,7 +289,7 @@ impl Cli {
         let max_id_len = sorted_rules.iter().map(|r| r.id().len()).max().unwrap_or(0);
 
         for rule in &sorted_rules {
-            let level = config.get_lint_level(*rule, ALL_GROUPS);
+            let level = config.get_lint_level(*rule, catalog.groups);
             let level_char = match level {
                 LintLevel::Hint => 'H',
                 LintLevel::Warning => 'W',
@@ -315,7 +315,7 @@ impl Cli {
         )
     }
 
-    fn list_groups() -> io::Result<()> {
+    fn list_groups(catalog: RuleCatalog) -> io::Result<()> {
         fn auto_fix_suffix(rule: &dyn Rule) -> &'static str {
             if rule.has_auto_fix() {
                 " (auto-fix)"
@@ -324,7 +324,7 @@ impl Cli {
             }
         }
         let mut stdout = io::stdout().lock();
-        for set in ALL_GROUPS {
+        for set in catalog.groups {
             writeln!(stdout, "`{}` - {}\n", set.name, set.description)?;
             for rule in set.rules {
                 let desc = rule.short_description();
@@ -341,8 +341,8 @@ impl Cli {
         Ok(())
     }
 
-    fn explain_rule(rule_id: &str) -> io::Result<ExitCode> {
-        let rule = USED_RULES.iter().find(|r| r.id() == rule_id);
+    fn explain_rule(rule_id: &str, catalog: RuleCatalog) -> io::Result<ExitCode> {
+        let rule = catalog.rules.iter().find(|r| r.id() == rule_id);
 
         if let Some(rule) = rule {
             let mut stdout = io::stdout().lock();
@@ -364,6 +364,19 @@ impl Cli {
     reason = "write failures are reported by the caller, not documented per stream"
 )]
 pub fn run() -> io::Result<ExitCode> {
+    run_with_catalog(RULE_CATALOG)
+}
+
+/// Run the nu-lint command-line application with a caller-supplied rule
+/// catalog.
+///
+/// This gives downstream binaries the stock check, fix, rule-discovery, and
+/// LSP behavior while allowing them to compile in their own rules and groups.
+#[allow(
+    clippy::missing_errors_doc,
+    reason = "write failures are reported by the caller, not documented per stream"
+)]
+pub fn run_with_catalog(catalog: RuleCatalog) -> io::Result<ExitCode> {
     let cli = Cli::parse();
 
     if cli.verbose {
@@ -372,30 +385,34 @@ pub fn run() -> io::Result<ExitCode> {
 
     match cli.into_command() {
         CliCommand::Check(check_args) => {
-            with_loaded_config(check_args.input.loaded_config(), |config| {
-                check_args.lint(config)
+            with_loaded_config(check_args.input.loaded_config(catalog), |config| {
+                check_args.lint(config, catalog)
             })
         }
-        CliCommand::Fix(fix_args) => with_loaded_config(fix_args.input.loaded_config(), |config| {
-            fix_args.fix(config)
-        }),
-        CliCommand::Lsp => Ok(start_lsp_server()),
-        CliCommand::Rules(rules_args) => run_rules_command(rules_args.into_command()),
+        CliCommand::Fix(fix_args) => {
+            with_loaded_config(fix_args.input.loaded_config(catalog), |config| {
+                fix_args.fix(config, catalog)
+            })
+        }
+        CliCommand::Lsp => Ok(start_lsp_server(catalog)),
+        CliCommand::Rules(rules_args) => run_rules_command(rules_args.into_command(), catalog),
         CliCommand::Dev(dev_command) => run_dev_command(dev_command),
-        CliCommand::Explain(explain_args) => run_rules_command(RulesCommand::Explain(explain_args)),
-        CliCommand::Groups => run_rules_command(RulesCommand::Groups),
+        CliCommand::Explain(explain_args) => {
+            run_rules_command(RulesCommand::Explain(explain_args), catalog)
+        }
+        CliCommand::Groups => run_rules_command(RulesCommand::Groups, catalog),
         CliCommand::Ast(ast_args) => run_dev_command(DevCommand::Ast(ast_args)),
     }
 }
 
-fn run_rules_command(rules_command: RulesCommand) -> io::Result<ExitCode> {
+fn run_rules_command(rules_command: RulesCommand, catalog: RuleCatalog) -> io::Result<ExitCode> {
     match rules_command {
         RulesCommand::List(list_args) => with_loaded_config(
-            load_validated_config(list_args.config.as_deref()),
-            |config| Cli::list_rules(config).map(|()| ExitCode::SUCCESS),
+            load_validated_config(list_args.config.as_deref(), catalog),
+            |config| Cli::list_rules(config, catalog).map(|()| ExitCode::SUCCESS),
         ),
-        RulesCommand::Explain(explain_args) => Cli::explain_rule(&explain_args.rule_id),
-        RulesCommand::Groups => Cli::list_groups().map(|()| ExitCode::SUCCESS),
+        RulesCommand::Explain(explain_args) => Cli::explain_rule(&explain_args.rule_id, catalog),
+        RulesCommand::Groups => Cli::list_groups(catalog).map(|()| ExitCode::SUCCESS),
     }
 }
 
@@ -413,15 +430,15 @@ impl RulesArgs {
 }
 
 #[cfg(feature = "lsp")]
-fn start_lsp_server() -> ExitCode {
+fn start_lsp_server(catalog: RuleCatalog) -> ExitCode {
     let _log_guard = lsp::init_lsp_log();
     tracing::info!("nu-lint LSP server started");
-    lsp::run_lsp_server();
+    lsp::run_lsp_server(catalog);
     ExitCode::SUCCESS
 }
 
 #[cfg(not(feature = "lsp"))]
-fn start_lsp_server() -> ExitCode {
+fn start_lsp_server(_catalog: RuleCatalog) -> ExitCode {
     let _ = writeln!(
         io::stderr(),
         "nu-lint was built without the `lsp` feature; rebuild with `--features lsp`"

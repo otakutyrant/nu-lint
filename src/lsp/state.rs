@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use lsp_types::{CodeActionOrCommand, Diagnostic, Hover, Range, TextDocumentPositionParams, Uri};
-use nu_lint_analysis::violation::Violation;
+use nu_lint_analysis::{rule::RuleCatalog, violation::Violation};
 
 use super::{
     completion::{CodeActionOptions, build_code_actions},
@@ -18,21 +18,27 @@ pub struct DocumentState {
 
 pub struct ServerState {
     engine: LintEngine,
+    catalog: RuleCatalog,
     documents: HashMap<Uri, DocumentState>,
     is_repl_client: bool,
 }
 
 impl ServerState {
-    pub fn new(config: Config, is_repl_client: bool) -> Self {
+    pub fn new(config: Config, catalog: RuleCatalog, is_repl_client: bool) -> Self {
         Self {
-            engine: crate::lint_engine_with_all_rules(config),
+            engine: LintEngine::new(config, catalog),
+            catalog,
             documents: HashMap::new(),
             is_repl_client,
         }
     }
 
     pub fn replace_config(&mut self, config: Config) {
-        self.engine = crate::lint_engine_with_all_rules(config);
+        self.engine = LintEngine::new(config, self.catalog);
+    }
+
+    pub const fn catalog(&self) -> RuleCatalog {
+        self.catalog
     }
 
     pub fn lint_document(&mut self, uri: &Uri, content: &str) -> Vec<Diagnostic> {

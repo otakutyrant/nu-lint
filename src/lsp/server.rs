@@ -13,6 +13,7 @@ use lsp_types::{
     },
     request::{CodeActionRequest, ExecuteCommand, HoverRequest, Request as RequestTrait},
 };
+use nu_lint_analysis::rule::RuleCatalog;
 
 use super::{
     actions::{DISABLE_RULE_COMMAND, execute_disable_rule},
@@ -41,8 +42,8 @@ fn show_error_message(connection: &Connection, message: String) {
     }
 }
 
-fn load_config_or_report(connection: &Connection) -> Config {
-    load_validated_config(None).unwrap_or_else(|config_error| {
+fn load_config_or_report(connection: &Connection, catalog: RuleCatalog) -> Config {
+    load_validated_config(None, catalog).unwrap_or_else(|config_error| {
         tracing::error!("Invalid nu-lint config: {config_error}");
         show_error_message(
             connection,
@@ -53,7 +54,7 @@ fn load_config_or_report(connection: &Connection) -> Config {
 }
 
 fn reload_config_and_relint(connection: &Connection, state: &mut ServerState) {
-    state.replace_config(load_config_or_report(connection));
+    state.replace_config(load_config_or_report(connection, state.catalog()));
     for uri in state.open_document_uris() {
         if let Some(doc) = state.get_document(&uri) {
             let content = doc.content.clone();
@@ -63,7 +64,7 @@ fn reload_config_and_relint(connection: &Connection, state: &mut ServerState) {
     }
 }
 
-pub fn run_lsp_server() {
+pub fn run_lsp_server(catalog: RuleCatalog) {
     let (connection, io_threads) = Connection::stdio();
 
     let server_capabilities = ServerCapabilities {
@@ -112,10 +113,10 @@ pub fn run_lsp_server() {
         .client_info
         .as_ref()
         .is_some_and(|ci| ci.name == "reedline");
-    let config = load_config_or_report(&connection);
+    let config = load_config_or_report(&connection, catalog);
     tracing::info!("nu-lint LSP server initialized");
 
-    let mut state = ServerState::new(config, is_repl_client);
+    let mut state = ServerState::new(config, catalog, is_repl_client);
 
     for msg in &connection.receiver {
         match msg {

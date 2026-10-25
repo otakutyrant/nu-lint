@@ -3,8 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use nu_lint_analysis::config::{Config, LintLevel};
-use nu_lint_rules::{USED_RULES, groups::ALL_GROUPS};
+use nu_lint_analysis::{
+    config::{Config, LintLevel},
+    rule::RuleCatalog,
+};
 
 use crate::LintError;
 
@@ -21,21 +23,23 @@ pub fn read_config_file(path: &Path) -> Result<Config, LintError> {
     parse_config_toml(&content)
 }
 
-pub fn validate_rule_levels(config: &Config) -> Result<(), LintError> {
+pub fn validate_rule_levels(config: &Config, catalog: RuleCatalog) -> Result<(), LintError> {
     log::debug!("Validating loaded configuration.");
 
-    if let Some(unknown_rule_id) = config
-        .rules
-        .keys()
-        .find(|rule_id| !USED_RULES.iter().any(|rule| rule.id() == rule_id.as_str()))
-    {
+    if let Some(unknown_rule_id) = config.rules.keys().find(|rule_id| {
+        !catalog
+            .rules
+            .iter()
+            .any(|rule| rule.id() == rule_id.as_str())
+    }) {
         return Err(LintError::RuleDoesNotExist {
             non_existing_id: unknown_rule_id.clone(),
         });
     }
 
     if let Some(unknown_group_name) = config.groups.keys().find(|group_name| {
-        !ALL_GROUPS
+        !catalog
+            .groups
             .iter()
             .any(|group| group.name == group_name.as_str())
     }) {
@@ -44,13 +48,13 @@ pub fn validate_rule_levels(config: &Config) -> Result<(), LintError> {
         });
     }
 
-    for rule in USED_RULES {
-        if config.get_lint_level(*rule, ALL_GROUPS) == LintLevel::Off {
+    for rule in catalog.rules {
+        if config.get_lint_level(*rule, catalog.groups) == LintLevel::Off {
             continue;
         }
 
         for conflicting_rule in rule.conflicts_with() {
-            if config.get_lint_level(*conflicting_rule, ALL_GROUPS) > LintLevel::Off {
+            if config.get_lint_level(*conflicting_rule, catalog.groups) > LintLevel::Off {
                 return Err(LintError::RuleConflict {
                     rule_a: rule.id(),
                     rule_b: conflicting_rule.id(),
@@ -66,7 +70,10 @@ pub fn user_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|config_dir| config_dir.join("nu-lint.toml"))
 }
 
-pub fn load_validated_config(explicit_path: Option<&Path>) -> Result<Config, LintError> {
+pub fn load_validated_config(
+    explicit_path: Option<&Path>,
+    catalog: RuleCatalog,
+) -> Result<Config, LintError> {
     let config_path = explicit_path
         .map(Path::to_path_buf)
         .or_else(|| user_config_path().filter(|path| path.is_file()));
@@ -74,13 +81,48 @@ pub fn load_validated_config(explicit_path: Option<&Path>) -> Result<Config, Lin
         Some(path) => read_config_file(&path)?,
         None => Config::default(),
     };
-    validate_rule_levels(&config)?;
+    validate_rule_levels(&config, catalog)?;
     Ok(config)
 }
 
 #[cfg(test)]
 mod tests {
+    use nu_lint_analysis::{
+        context::LintContext,
+        rule::{DetectFix, Rule},
+        violation::Detection,
+    };
+    use nu_lint_rules::RULE_CATALOG;
+
     use super::*;
+
+    struct CustomRule;
+
+    impl DetectFix for CustomRule {
+        type FixInput<'a> = ();
+
+        fn id(&self) -> &'static str {
+            "custom_rule"
+        }
+
+        fn level(&self) -> LintLevel {
+            LintLevel::Off
+        }
+
+        fn detect<'a>(&self, _context: &'a LintContext) -> Vec<(Detection, Self::FixInput<'a>)> {
+            vec![]
+        }
+
+        fn short_description(&self) -> &'static str {
+            "Test a caller-supplied rule catalog"
+        }
+    }
+
+    static CUSTOM_RULES: &[&dyn Rule] = &[&CustomRule];
+    const CUSTOM_CATALOG: RuleCatalog = RuleCatalog {
+        rules: CUSTOM_RULES,
+        groups: &[],
+    };
 
     #[test]
     fn test_load_config_simple_str() {
@@ -98,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_validate_passes_with_default_config() {
-        let result = validate_rule_levels(&Config::default());
+        let result = validate_rule_levels(&Config::default(), RULE_CATALOG);
         assert!(result.is_ok());
     }
 
@@ -106,7 +148,7 @@ mod tests {
     fn test_validate_rejects_unknown_group() {
         let config = parse_config_toml("[groups]\nfiltering = \"off\"").unwrap();
         assert!(matches!(
-            validate_rule_levels(&config),
+            validate_rule_levels(&config, RULE_CATALOG),
             Err(LintError::GroupDoesNotExist { non_existing_name }) if non_existing_name == "filtering"
         ));
     }
@@ -114,6 +156,17 @@ mod tests {
     #[test]
     fn test_validate_accepts_known_group() {
         let config = parse_config_toml("[groups]\npipe-instead-of-loop = \"off\"").unwrap();
-        assert!(validate_rule_levels(&config).is_ok());
+        assert!(validate_rule_levels(&config, RULE_CATALOG).is_ok());
+    }
+
+    #[test]
+    fn custom_catalog_validates_custom_rule_id() {
+        let config = parse_config_toml("[rules]\ncustom_rule = \"error\"").unwrap();
+
+        assert!(validate_rule_levels(&config, CUSTOM_CATALOG).is_ok());
+        assert!(matches!(
+            validate_rule_levels(&config, RULE_CATALOG),
+            Err(LintError::RuleDoesNotExist { non_existing_id }) if non_existing_id == "custom_rule"
+        ));
     }
 }
