@@ -1,4 +1,6 @@
-use std::{collections::BTreeSet, iter::once, ops::ControlFlow, str::from_utf8, vec::Vec};
+use std::{
+    collections::BTreeSet, iter::once, ops::ControlFlow, path::Path, str::from_utf8, vec::Vec,
+};
 
 use nu_protocol::{
     Span,
@@ -29,6 +31,7 @@ pub struct LintContext<'a> {
     pub working_set: &'a StateWorkingSet<'a>,
     /// Byte offset where this file starts in the global span space
     file_offset: usize,
+    file_path: Option<&'a Path>,
     pub config: &'a Config,
 }
 
@@ -40,6 +43,7 @@ impl<'a> LintContext<'a> {
         engine_state: &'a EngineState,
         working_set: &'a StateWorkingSet<'a>,
         file_offset: usize,
+        file_path: Option<&'a Path>,
         config: &'a Config,
     ) -> Self {
         Self {
@@ -48,6 +52,7 @@ impl<'a> LintContext<'a> {
             engine_state,
             working_set,
             file_offset,
+            file_path,
             config,
         }
     }
@@ -67,6 +72,7 @@ impl<'a> LintContext<'a> {
             engine_state,
             working_set,
             file_offset,
+            None,
             Config::default_static(),
         )
     }
@@ -79,6 +85,14 @@ impl<'a> LintContext<'a> {
     )]
     pub const unsafe fn source(&self) -> &str {
         self.source
+    }
+
+    /// Return the canonical path of the file being linted.
+    ///
+    /// In-memory strings and standard input have no file path.
+    #[must_use]
+    pub const fn file_path(&self) -> Option<&Path> {
+        self.file_path
     }
 
     /// Check if a global span is within the user's file bounds

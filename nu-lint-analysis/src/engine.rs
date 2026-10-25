@@ -126,7 +126,13 @@ impl LintEngine {
         let file_path = fs::canonicalize(path).ok();
         let (block, working_set, file_offset) =
             parse_source(self.engine_state, source.as_bytes(), file_path.as_deref());
-        let mut violations = self.lint_parsed(&source, &block, &working_set, file_offset);
+        let mut violations = self.lint_parsed(
+            &source,
+            &block,
+            &working_set,
+            file_offset,
+            file_path.as_deref(),
+        );
 
         for violation in &mut violations {
             violation.file = Some(path.into());
@@ -193,7 +199,7 @@ impl LintEngine {
     pub fn lint_str(&self, source: &str) -> Vec<Violation> {
         let (block, working_set, file_offset) =
             parse_source(self.engine_state, source.as_bytes(), None);
-        self.lint_parsed(source, &block, &working_set, file_offset)
+        self.lint_parsed(source, &block, &working_set, file_offset, None)
     }
 
     fn lint_parsed(
@@ -202,6 +208,7 @@ impl LintEngine {
         block: &Block,
         working_set: &StateWorkingSet,
         file_offset: usize,
+        file_path: Option<&Path>,
     ) -> Vec<Violation> {
         let context = LintContext::new(
             source,
@@ -209,6 +216,7 @@ impl LintEngine {
             self.engine_state,
             working_set,
             file_offset,
+            file_path,
             &self.config,
         );
 
